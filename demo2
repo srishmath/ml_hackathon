@@ -1,0 +1,154 @@
+import os
+import cv2
+import pandas as pd
+import numpy as np
+import re
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset
+from gensim.models import Word2Vec
+from sklearn.preprocessing import LabelEncoder
+
+# Custom tokenization function for text
+def custom_tokenize(text):
+    text = re.sub(r'([.,!?()"])', r' \1 ', text)  # Add spaces around punctuation marks
+    text = text.lower()  # Convert to lowercase
+    tokens = text.split()  # Split the text into words (tokens)
+    return tokens
+
+# Tokenize and train Word2Vec model
+train_df['tokens'] = train_df['Utterance'].apply(custom_tokenize)
+df['tokens'] = df['Utterance'].apply(custom_tokenize)
+word2vec_model = Word2Vec(train_df['tokens'], vector_size=100, window=5, min_count=1, workers=4)
+
+# Function to generate text embeddings
+def get_text_embedding(tokens):
+    embeddings = [word2vec_model.wv[token] for token in tokens if token in word2vec_model.wv]
+    return np.mean(embeddings, axis=0) if embeddings else np.zeros(word2vec_model.vector_size)
+
+train_df['text_embeddings'] = train_df['tokens'].apply(get_text_embedding)
+df['text_embeddings'] = df['tokens'].apply(get_text_embedding)
+
+# PyTorch CNN model for face processing
+class FaceCNN(nn.Module):
+    def __init__(self):
+        super(FaceCNN, self).__init__()
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.fc1 = nn.Linear(128 * 6 * 6, 128)  # assuming 48x48 input, pool 3 times reduces to 6x6
+        self.dropout = nn.Dropout(0.5)
+    
+    def forward(self, x):
+        x = self.pool(torch.relu(self.conv1(x)))
+        x = self.pool(torch.relu(self.conv2(x)))
+        x = self.pool(torch.relu(self.conv3(x)))
+        x = x.view(-1, 128 * 6 * 6)  # flatten
+        x = self.dropout(torch.relu(self.fc1(x)))
+        return x
+
+# Combined model for face and text features
+class CombinedModel(nn.Module):
+    def __init__(self):
+        super(CombinedModel, self).__init__()
+        self.face_cnn = FaceCNN()
+        self.fc_text = nn.Linear(100, 128)  # Process 100-dim Word2Vec embedding
+        self.fc_combined = nn.Sequential(
+            nn.Linear(128 + 128, 64),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(64, 5),  # 5 emotion classes
+            nn.Softmax(dim=1)
+        )
+    
+    def forward(self, face_input, text_input):
+        face_features = self.face_cnn(face_input)
+        text_features = torch.relu(self.fc_text(text_input))
+        combined = torch.cat((face_features, text_features), dim=1)
+        return self.fc_combined(combined)
+
+# Instantiate model, loss, and optimizer
+combined_model = CombinedModel()
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(combined_model.parameters(), lr=0.001)
+
+# Data preprocessing functions
+def preprocess_face_image(face_image):
+    face_image = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)
+    face_image = cv2.resize(face_image, (48, 48))
+    face_image = face_image / 255.0
+    return face_image.astype(np.float32).reshape(1, 48, 48)  # 1 channel for grayscale
+
+# PyTorch Dataset class
+class EmotionDataset(Dataset):
+    def __init__(self, df):
+        self.df = df
+        self.label_encoder = LabelEncoder()
+        self.labels = self.label_encoder.fit_transform(df['Emotion'])
+    
+    def __len__(self):
+        return len(self.df)
+    
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+        video_path = row['video_clip_path']
+        text_embedding = torch.tensor(row['text_embeddings'], dtype=torch.float32)
+        emotion_label = self.labels[idx]
+        
+        # Process video frames
+        face_images = []
+        video = cv2.VideoCapture(video_path)
+        while True:
+            ret, frame = video.read()
+            if not ret:
+                break
+            face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+            for (x, y, w, h) in faces:
+                face = frame[y:y+h, x:x+w]
+                preprocessed_face = preprocess_face_image(face)
+                face_images.append(preprocessed_face)
+        
+        video.release()
+        face_input = torch.tensor(face_images[0], dtype=torch.float32)  # Use first detected face
+        return face_input, text_embedding, emotion_label
+
+# Specify number of samples to use from the training data
+num_train_samples = 50  # Adjust as needed
+
+# Create a subset of the training data
+train_subset_df = train_df.sample(n=num_train_samples, random_state=42).reset_index(drop=True)
+
+# Generate text embeddings for the subset
+train_subset_df['text_embeddings'] = train_subset_df['tokens'].apply(get_text_embedding)
+
+# Create dataset and DataLoader for the training subset
+train_subset_dataset = EmotionDataset(train_subset_df)
+train_subset_loader = DataLoader(train_subset_dataset, batch_size=32, shuffle=True)
+
+# Training loop
+num_epochs = 10
+for epoch in range(num_epochs):
+    combined_model.train()
+    running_loss = 0.0
+    correct = 0
+    total = 0
+    for i, (face_input, text_input, labels) in enumerate(train_subset_loader):
+        optimizer.zero_grad()
+        outputs = combined_model(face_input, text_input)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        
+        running_loss += loss.item()
+        _, predicted = torch.max(outputs, 1)
+        total += labels.size(0)
+        correct += (predicted == labels).sum().item()
+    
+    accuracy = 100 * correct / total
+    print(f'Epoch [{epoch + 1}/{num_epochs}], Loss: {running_loss:.4f}, Accuracy: {accuracy:.2f}%')
+
+# At this point, you can also evaluate the model on the test dataset similarly to assess performance.
