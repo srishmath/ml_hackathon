@@ -1,0 +1,104 @@
+import cv2
+import numpy as np
+import requests
+import os
+
+# Function to download the Haar cascade files from GitHub if they do not exist locally
+def download_haar_cascade(cascade_name, url):
+    if not os.path.exists(cascade_name):
+        print(f"Downloading {cascade_name}...")
+        response = requests.get(url)
+        if response.status_code == 200:
+            with open(cascade_name, 'wb') as f:
+                f.write(response.content)
+            print(f"{cascade_name} downloaded successfully.")
+        else:
+            print(f"Failed to download {cascade_name}. HTTP Status Code: {response.status_code}")
+    else:
+        print(f"{cascade_name} already exists.")
+
+# URLs for Haar cascades on GitHub
+cascade_urls = {
+    'haarcascade_frontalface_default.xml': 'https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml',
+    'haarcascade_eye.xml': 'https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_eye.xml',
+    'haarcascade_mcs_nose.xml': 'https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_mcs_nose.xml',
+    'haarcascade_mcs_mouth.xml': 'https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_mcs_mouth.xml',
+    'haarcascade_mcs_eyebrow.xml': 'https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_mcs_eyebrow.xml'
+}
+
+# Download Haar cascades if they don't exist locally
+for cascade_name, url in cascade_urls.items():
+    download_haar_cascade(cascade_name, url)
+
+# Preprocess face image for model input
+def preprocess_face_image(face_image):
+    face_image = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)  # Convert to grayscale
+    face_image = cv2.resize(face_image, (48, 48))  # Resize to 48x48
+    face_image = face_image / 255.0  # Normalize to [0, 1]
+    return face_image.astype(np.float32).reshape(1, 48, 48)  # Add channel dimension for grayscale
+
+# Function to verify face by detecting eyes, nose, mouth, and eyebrows within the region
+def is_face_with_features(face_region, eye_cascade, nose_cascade, mouth_cascade, eyebrow_cascade):
+    # Detect eyes, nose, mouth, and eyebrows
+    eyes = eye_cascade.detectMultiScale(face_region, scaleFactor=1.1, minNeighbors=5, minSize=(15, 15))
+    nose = nose_cascade.detectMultiScale(face_region, scaleFactor=1.1, minNeighbors=5, minSize=(20, 20))
+    mouth = mouth_cascade.detectMultiScale(face_region, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+    eyebrows = eyebrow_cascade.detectMultiScale(face_region, scaleFactor=1.1, minNeighbors=5, minSize=(20, 20))
+
+    # Face is valid if at least one eye, nose, mouth, and eyebrow are detected
+    return len(eyes) >= 1 and len(nose) >= 1 and len(mouth) >= 1 and len(eyebrows) >= 1
+
+# Function to extract verified faces from video using eye, nose, mouth, and eyebrow detection
+def extract_faces_from_video(video_path, max_faces=5, frame_skip=5):
+    face_images = []
+    video = cv2.VideoCapture(video_path)  # Open video file
+
+    # Load cascades
+    face_cascade = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
+    eye_cascade = cv2.CascadeClassifier('haarcascade_eye.xml')
+    nose_cascade = cv2.CascadeClassifier('haarcascade_mcs_nose.xml')
+    mouth_cascade = cv2.CascadeClassifier('haarcascade_mcs_mouth.xml')
+    eyebrow_cascade = cv2.CascadeClassifier('haarcascade_mcs_eyebrow.xml')
+
+    frame_count = 0  # Track frame count for skipping
+    detected_faces = set()  # Track detected faces' positions to avoid duplicates
+
+    while len(face_images) < max_faces:
+        ret, frame = video.read()  # Read frame
+        if not ret:
+            break
+
+        # Skip frames to reduce redundant detections
+        if frame_count % frame_skip == 0:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # Convert to grayscale
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+            
+            for (x, y, w, h) in faces:
+                face_region = gray[y:y+h, x:x+w]
+                
+                # Verify if detected region contains eyes, nose, mouth, and eyebrows
+                if is_face_with_features(face_region, eye_cascade, nose_cascade, mouth_cascade, eyebrow_cascade):
+                    face_id = (x, y, w, h)
+                    
+                    # Ensure no duplicate faces by tracking unique face positions
+                    if face_id not in detected_faces:
+                        detected_faces.add(face_id)  # Mark this face as detected
+                        preprocessed_face = preprocess_face_image(frame[y:y+h, x:x+w])  # Preprocess for model
+                        face_images.append(preprocessed_face)
+                        
+                        # Break loop if maximum faces are reached
+                        if len(face_images) >= max_faces:
+                            break
+
+        frame_count += 1  # Increment frame counter
+    
+    video.release()  # Release video capture
+    return face_images
+
+# Example: Extract faces from a video file
+video_path = 'path_to_your_video.mp4'
+faces = extract_faces_from_video(video_path)
+if faces:
+    print(f"Faces detected: {len(faces)}")
+else:
+    print("No faces detected.")
