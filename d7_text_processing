@@ -1,0 +1,31 @@
+import os
+import cv2
+import pandas as pd
+import numpy as np
+import re
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, Dataset
+from gensim.models import Word2Vec
+from sklearn.preprocessing import LabelEncoder
+
+# Custom tokenization function for text
+def custom_tokenize(text):
+    text = re.sub(r'([.,!?()"])', r' \1 ', text)  # Add spaces around punctuation marks
+    text = text.lower()  # Convert to lowercase
+    tokens = text.split()  # Split the text into words (tokens)
+    return tokens
+
+# Tokenize and train Word2Vec model
+train_df['tokens'] = train_df['Utterance'].apply(custom_tokenize)
+df['tokens'] = df['Utterance'].apply(custom_tokenize)
+word2vec_model = Word2Vec(train_df['tokens'], vector_size=100, window=5, min_count=1, workers=4)
+
+# Function to generate text embeddings
+def get_text_embedding(tokens):
+    embeddings = [word2vec_model.wv[token] for token in tokens if token in word2vec_model.wv]
+    return np.mean(embeddings, axis=0) if embeddings else np.zeros(word2vec_model.vector_size)
+
+train_df['text_embeddings'] = train_df['tokens'].apply(get_text_embedding)
+df['text_embeddings'] = df['tokens'].apply(get_text_embedding)
