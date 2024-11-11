@@ -1,0 +1,92 @@
+import torch
+import torch.nn as nn
+
+# Sample input for the first 5 rows (use actual data in your case)
+# Assuming 'train_df' has the necessary columns: 'text_embedding' and 'Emotion'
+# and 'features_df' has 'features' column (for video features)
+
+# For demonstration, let's assume text_embeddings and video_features are numpy arrays
+text_embeddings = torch.tensor(features_df['text_embedding'].iloc[:5].values.tolist())  # Assuming 5 samples
+video_features = torch.tensor(features_df['features'].iloc[:5].values.tolist())  # Assuming 5 samples
+
+# Ensure correct shapes (2D for both text_embeddings and video_features)
+print(f"text_embeddings shape: {text_embeddings.shape}")
+print(f"video_features shape: {video_features.shape}")
+
+# If text_embeddings_tensor or video_features_tensor are 3D, flatten them
+if len(text_embeddings.shape) == 3:
+    # Flatten the text embeddings (e.g., sequence_length, feature_size -> feature_size)
+    text_embeddings = text_embeddings.view(text_embeddings.shape[0], -1)
+
+if len(video_features.shape) == 3:
+    # Flatten the video features (e.g., sequence_length, feature_size -> feature_size)
+    video_features = video_features.view(video_features.shape[0], -1)
+
+print(f"Flattened text_embeddings shape: {text_embeddings.shape}")
+print(f"Flattened video_features shape: {video_features.shape}")
+
+# Define a simple neural network model for emotion prediction
+class MultiModalEmotionModel(nn.Module):
+    def __init__(self, text_input_size, video_input_size, hidden_size, output_size):
+        super(MultiModalEmotionModel, self).__init__()
+        
+        # Linear layers for text and video features
+        self.text_fc = nn.Linear(text_input_size, hidden_size)
+        self.video_fc = nn.Linear(video_input_size, hidden_size)
+        
+        # Final classification layer
+        self.fc = nn.Linear(2 * hidden_size, output_size)  # Concatenated text and video features
+        
+    def forward(self, text_features, video_features):
+        # Process text and video features through their respective layers
+        text_out = torch.relu(self.text_fc(text_features))
+        video_out = torch.relu(self.video_fc(video_features))
+        
+        # Concatenate the outputs
+        combined_features = torch.cat((text_out, video_out), dim=1)
+        
+        # Pass through the final classification layer
+        outputs = self.fc(combined_features)
+        
+        return outputs
+
+# Define the model (assuming input sizes)
+text_input_size = text_embeddings.shape[1]  # Number of features in text embedding
+video_input_size = video_features.shape[1]  # Number of features in video features
+hidden_size = 128  # Hidden layer size
+output_size = 5  # We have 5 emotions: anger, joy, neutral, sadness, surprise
+
+model = MultiModalEmotionModel(text_input_size, video_input_size, hidden_size, output_size)
+
+# Actual emotions from train_df for the first 5 rows
+# Mapping of emotions to integers: anger=0, joy=1, neutral=2, sadness=3, surprise=4
+emotion_mapping = {'anger': 0, 'joy': 1, 'neutral': 2, 'sadness': 3, 'surprise': 4}
+actual_emotions = train_df['Emotion'].iloc[:5].values
+
+# Convert actual emotions to tensor (using emotion_mapping)
+actual_emotions = torch.tensor([emotion_mapping[emotion] for emotion in actual_emotions])
+
+# Define a loss function and optimizer
+criterion = nn.CrossEntropyLoss()
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+# Forward pass (using the first 5 samples for training)
+outputs = model(text_embeddings, video_features)
+
+# Compute loss
+loss = criterion(outputs, actual_emotions)
+
+# Backward pass and optimization step
+optimizer.zero_grad()
+loss.backward()
+optimizer.step()
+
+# Check the predicted emotion (argmax for classification)
+_, predicted_emotions = torch.max(outputs, 1)
+
+# Calculate accuracy
+accuracy = (predicted_emotions == actual_emotions).float().mean()
+
+# Print loss and accuracy
+print(f"Loss: {loss.item()}")
+print(f"Accuracy: {accuracy.item() * 100}%")
