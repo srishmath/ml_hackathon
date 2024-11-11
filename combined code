@@ -1,0 +1,174 @@
+import cv2
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import pandas as pd
+from torchvision import transforms
+from transformers import BertTokenizer, BertModel
+from torch.utils.data import DataLoader, Dataset
+from sklearn.preprocessing import LabelEncoder
+
+# Define your CNN model for face feature extraction
+class SimpleCNN(nn.Module):
+    def __init__(self):
+        super(SimpleCNN, self).__init__()
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.fc1 = nn.Linear(128 * 6 * 6, 512)
+        self.fc2 = nn.Linear(512, 128)
+    
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = self.pool(x)
+        x = F.relu(self.conv2(x))
+        x = self.pool(x)
+        x = F.relu(self.conv3(x))
+        x = self.pool(x)
+        x = x.view(-1, 128 * 6 * 6)
+        x = F.relu(self.fc1(x))
+        x = self.fc2(x)  # output 128-dimensional feature vector
+        return x
+
+# Initialize CNN and BERT models
+face_model = SimpleCNN()
+face_model.eval()  # Set CNN to evaluation mode
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+text_model = BertModel.from_pretrained('bert-base-uncased')
+
+# Transform for CNN face feature extraction
+transform = transforms.Compose([
+    transforms.ToPILImage(),
+    transforms.Resize((48, 48)),
+    transforms.Grayscale(num_output_channels=1),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.5], std=[0.5])
+])
+
+# Function to get BERT embedding for text
+def get_bert_embedding(text):
+    inputs = tokenizer(text, return_tensors='pt', truncation=True, padding=True, max_length=128)
+    with torch.no_grad():
+        outputs = text_model(**inputs)
+    embeddings = outputs.last_hidden_state.mean(dim=1)
+    return embeddings.squeeze().numpy()
+
+# Function to preprocess and get CNN features from face image
+def preprocess_face_image(face_image):
+    face_image = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)
+    face_image = cv2.resize(face_image, (48, 48))
+    face_image = face_image / 255.0
+    return face_image.astype(np.float32).reshape(1, 48, 48)
+
+# Function to extract faces from video and get CNN features
+def extract_faces_features(video_path, max_faces=5):
+    face_features = []
+    faces = extract_faces_from_video(video_path, max_faces=max_faces)  # Assume this function exists as described
+    for face in faces:
+        face_tensor = torch.tensor(face).unsqueeze(0).float()
+        face_tensor = transform(face_tensor.squeeze(0))
+        face_tensor = face_tensor.unsqueeze(0)
+        
+        with torch.no_grad():
+            feature_vector = face_model(face_tensor).numpy()
+            face_features.append(feature_vector)
+    
+    if face_features:
+        return np.mean(face_features, axis=0)  # Average face features for the video
+    else:
+        return np.zeros((128,))  # If no faces are found, return zero-vector
+
+# Assuming `train_df` has 'video_clip_path' and 'Utterance' columns
+all_features = []
+for idx, row in train_df.iterrows():
+    video_path = row['video_clip_path']
+    utterance = row['Utterance']
+    
+    # Get face features
+    face_features = extract_faces_features(video_path)
+    
+    # Get text features
+    text_features = get_bert_embedding(utterance)
+    
+    # Combine features
+    combined_features = np.concatenate((face_features, text_features))
+    all_features.append(combined_features)
+
+# Create DataFrame with combined features and labels
+feature_df = pd.DataFrame(all_features, columns=[f'feature_{i}' for i in range(combined_features.shape[0])])
+feature_df['label'] = train_df['label']  # Assuming 'label' is the target column
+
+# Dataset and DataLoader
+class EmotionDataset(Dataset):
+    def __init__(self, feature_df):
+        self.features = feature_df.drop(columns=['label']).values
+        self.labels = LabelEncoder().fit_transform(feature_df['label'].values)
+        
+    def __len__(self):
+        return len(self.features)
+    
+    def __getitem__(self, idx):
+        return torch.tensor(self.features[idx], dtype=torch.float32), torch.tensor(self.labels[idx], dtype=torch.long)
+
+dataset = EmotionDataset(feature_df)
+train_loader = DataLoader(dataset, batch_size=32, shuffle=True)
+
+# Define classifier model
+class EmotionClassifier(nn.Module):
+    def __init__(self, input_dim, hidden_dim, num_classes):
+        super(EmotionClassifier, self).__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim // 2)
+        self.fc3 = nn.Linear(hidden_dim // 2, num_classes)
+        self.dropout = nn.Dropout(0.5)
+        
+    def forward(self, x):
+        x = torch.relu(self.fc1(x))
+        x = self.dropout(x)
+        x = torch.relu(self.fc2(x))
+        x = self.fc3(x)
+        return x
+
+# Model parameters
+input_dim = feature_df.shape[1] - 1  # Number of combined features
+hidden_dim = 256  # Adjust based on your data size
+num_classes = len(feature_df['label'].unique())  # 5 classes: anger, joy, neutral, sadness, surprise
+
+# Initialize model, loss function, and optimizer
+model = EmotionClassifier(input_dim=input_dim, hidden_dim=hidden_dim, num_classes=num_classes)
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+# Training loop
+num_epochs = 10
+for epoch in range(num_epochs):
+    model.train()
+    running_loss = 0.0
+    correct = 0
+    total = 0
+    
+    for features, labels in train_loader:
+        optimizer.zero_grad()
+        outputs = model(features)
+        
+        # Calculate loss and backpropagate
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+        
+        # Accumulate loss and calculate accuracy
+        running_loss += loss.item()
+        _, predicted = torch.max(outputs, 1)
+        correct += (predicted == labels).sum().item()
+        total += labels.size(0)
+    
+    # Calculate average loss and accuracy for the epoch
+    epoch_loss = running_loss / len(train_loader)
+    epoch_accuracy = 100 * correct / total
+    print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {epoch_loss:.4f}, Accuracy: {epoch_accuracy:.2f}%")
+
+# Final training accuracy
+print("Final Training Accuracy: {:.2f}%".format(epoch_accuracy))
