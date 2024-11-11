@@ -1,0 +1,119 @@
+import os
+import cv2
+import pandas as pd
+import numpy as np
+from keras.models import Sequential, load_model
+from keras.layers import Conv2D, MaxPooling2D, Flatten, Dense, Dropout
+from keras.optimizers import Adam
+
+# Define paths
+video_dir = r"C:\Users\srish\Documents\pes\pes_year3\sem5\ml\Set2_Emotions\train\train_videos"
+train_df = pd.read_csv(r"C:\Users\srish\Documents\pes\pes_year3\sem5\ml\Set2_Emotions\train\train.csv", encoding='cp1252')
+
+# Function to get video file path from IDs
+def get_video_clip_path(row):
+    dialogue_id = row['Dialogue_ID']
+    utterance_id = row['Utterance_ID']
+    filename = f"dia{dialogue_id}_utt{utterance_id}.mp4"
+    return os.path.join(video_dir, filename)
+
+# Apply the function to get file paths for each sampled clip
+train_df['video_clip_path'] = train_df.apply(get_video_clip_path, axis=1)
+
+# Check sample paths
+print(train_df[['Dialogue_ID', 'Utterance_ID', 'video_clip_path']].head())
+
+# --------------------------
+# 1. Build the CNN model for emotion classification
+def build_cnn_model(input_shape=(48, 48, 1), num_classes=5):
+    model = Sequential()
+
+    # Add convolutional layers with max pooling
+    model.add(Conv2D(32, kernel_size=(3, 3), activation='relu', input_shape=input_shape))
+    model.add(MaxPooling2D(pool_size=(2, 2)))
+
+    model.add(Conv2D(64, kernel_size=(3, 3), activation='relu'))
+    model.add(MaxPooling2D(pool_size=(2, 2)))
+
+    model.add(Conv2D(128, kernel_size=(3, 3), activation='relu'))
+    model.add(MaxPooling2D(pool_size=(2, 2)))
+
+    # Flatten the output to feed it to dense layers
+    model.add(Flatten())
+
+    # Add fully connected layers (dense layers)
+    model.add(Dense(128, activation='relu'))
+    model.add(Dropout(0.5))
+    model.add(Dense(64, activation='relu'))
+    model.add(Dropout(0.5))
+    model.add(Dense(num_classes, activation='softmax'))  # Output layer for 5 emotion classes
+
+    # Compile the model
+    model.compile(optimizer=Adam(), loss='categorical_crossentropy', metrics=['accuracy'])
+
+    return model
+
+# Load or train the CNN model for emotion classification
+cnn_model = build_cnn_model()
+
+# Load pre-trained model (replace with your actual model path)
+cnn_model = load_model('emotion_recognition_model.h5')
+
+# Define emotion labels (ensure this matches the order used in your model)
+emotion_labels = ['anger', 'joy', 'neutral', 'sadness', 'surprise']
+
+# --------------------------
+# 2. Video Processing: Extract faces and classify emotions
+def preprocess_face_image(face_image):
+    face_image = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)  # Convert to grayscale
+    face_image = cv2.resize(face_image, (48, 48))  # Resize to 48x48
+    face_image = face_image / 255.0  # Normalize to [0, 1]
+    face_image = np.expand_dims(face_image, axis=-1)  # Add channel dimension for grayscale image
+    return face_image
+
+def predict_emotion_from_face(face):
+    processed_face = preprocess_face_image(face)
+    processed_face = np.expand_dims(processed_face, axis=0)  # Add batch dimension
+    emotion_probs = cnn_model.predict(processed_face)
+    emotion_class = np.argmax(emotion_probs)  # Get the index of the highest probability
+    return emotion_labels[emotion_class]
+
+# --------------------------
+# 3. Processing each video and extracting face features
+def extract_faces_from_video(video_path):
+    # Load the video
+    video = cv2.VideoCapture(video_path)
+    
+    # Initialize the face detector (Haar Cascade Classifier)
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    
+    emotions = []
+    while True:
+        ret, frame = video.read()
+        if not ret:
+            break
+        
+        # Detect faces in the frame
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+        
+        # For each face, extract the face region and predict emotion
+        for (x, y, w, h) in faces:
+            face = frame[y:y+h, x:x+w]
+            emotion = predict_emotion_from_face(face)
+            emotions.append(emotion)
+    
+    video.release()
+    return emotions
+
+# --------------------------
+# 4. Combine the data: link video, utterance, and emotion predictions
+def link_video_with_utterance(train_df):
+    train_df['predicted_emotions'] = train_df['video_clip_path'].apply(extract_faces_from_video)
+    return train_df
+
+# Apply the function to link emotions with each video
+train_df = link_video_with_utterance(train_df)
+
+# Show the results
+print(train_df[['Dialogue_ID', 'Utterance_ID', 'video_clip_path', 'predicted_emotions']].head())
