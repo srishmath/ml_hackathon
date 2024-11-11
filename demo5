@@ -13,17 +13,29 @@ def is_face_with_features(face_region, eye_cascade):
     eyes = eye_cascade.detectMultiScale(face_region, scaleFactor=1.1, minNeighbors=5, minSize=(15, 15))
     return len(eyes) >= 1
 
-# Function to calculate distance between two face bounding boxes
-def calculate_distance(face1, face2):
-    x1, y1, w1, h1 = face1
-    x2, y2, w2, h2 = face2
-    # Use the center of the face to calculate distance
-    center1 = (x1 + w1 / 2, y1 + h1 / 2)
-    center2 = (x2 + w2 / 2, y2 + h2 / 2)
-    return np.sqrt((center2[0] - center1[0])**2 + (center2[1] - center1[1])**2)
+# Function to calculate the Intersection over Union (IoU) between two bounding boxes
+def calculate_iou(bbox1, bbox2):
+    x1, y1, w1, h1 = bbox1
+    x2, y2, w2, h2 = bbox2
+    
+    # Calculate area of intersection
+    xA = max(x1, x2)
+    yA = max(y1, y2)
+    xB = min(x1 + w1, x2 + w2)
+    yB = min(y1 + h1, y2 + h2)
+    
+    inter_area = max(0, xB - xA) * max(0, yB - yA)
+    
+    # Calculate areas of both bounding boxes
+    box1_area = w1 * h1
+    box2_area = w2 * h2
+    
+    # Calculate IoU
+    iou = inter_area / float(box1_area + box2_area - inter_area)
+    return iou
 
 # Function to extract verified faces from video using eye detection
-def extract_faces_from_video(video_path, max_faces=5, frame_skip=5, distance_threshold=50):
+def extract_faces_from_video(video_path, max_faces=5, frame_skip=5, iou_threshold=0.3):
     face_images = []
     video = cv2.VideoCapture(video_path)  # Open video file
 
@@ -49,11 +61,12 @@ def extract_faces_from_video(video_path, max_faces=5, frame_skip=5, distance_thr
                 
                 # Verify if detected region contains eyes
                 if is_face_with_features(face_region, eye_cascade):
-                    # Check if this face is similar to already detected faces
                     is_duplicate = False
+                    
+                    # Check if this face overlaps too much with any previously detected face
                     for detected_face in detected_faces:
-                        distance = calculate_distance((x, y, w, h), detected_face)
-                        if distance < distance_threshold:
+                        iou = calculate_iou((x, y, w, h), detected_face)
+                        if iou > iou_threshold:  # Consider faces as duplicate if IoU is high
                             is_duplicate = True
                             break
                     
