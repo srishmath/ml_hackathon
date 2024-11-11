@@ -1,0 +1,95 @@
+import cv2
+import numpy as np
+
+# Preprocess face image for model input
+def preprocess_face_image(face_image):
+    face_image = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)  # Convert to grayscale
+    face_image = cv2.resize(face_image, (48, 48))  # Resize to 48x48
+    face_image = face_image / 255.0  # Normalize to [0, 1]
+    return face_image.astype(np.float32).reshape(1, 48, 48)  # Add channel dimension for grayscale
+
+# Function to verify face by detecting eyes within the region
+def is_face_with_features(face_region, eye_cascade):
+    eyes = eye_cascade.detectMultiScale(face_region, scaleFactor=1.1, minNeighbors=5, minSize=(15, 15))
+    return len(eyes) >= 1
+
+# Function to calculate distance between two face bounding boxes
+def calculate_distance(face1, face2):
+    x1, y1, w1, h1 = face1
+    x2, y2, w2, h2 = face2
+    # Use the center of the face to calculate distance
+    center1 = (x1 + w1 / 2, y1 + h1 / 2)
+    center2 = (x2 + w2 / 2, y2 + h2 / 2)
+    return np.sqrt((center2[0] - center1[0])**2 + (center2[1] - center1[1])**2)
+
+# Function to extract verified faces from video using eye detection
+def extract_faces_from_video(video_path, max_faces=5, frame_skip=5, distance_threshold=50):
+    face_images = []
+    video = cv2.VideoCapture(video_path)  # Open video file
+
+    # Load cascades once
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+
+    frame_count = 0  # Track frame count for skipping
+    detected_faces = []  # List to track faces across frames
+
+    while len(face_images) < max_faces:
+        ret, frame = video.read()  # Read frame
+        if not ret:
+            break
+
+        # Skip frames to reduce redundant detections
+        if frame_count % frame_skip == 0:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # Convert to grayscale
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+            
+            for (x, y, w, h) in faces:
+                face_region = gray[y:y+h, x:x+w]
+                
+                # Verify if detected region contains eyes
+                if is_face_with_features(face_region, eye_cascade):
+                    # Check if this face is similar to already detected faces
+                    is_duplicate = False
+                    for detected_face in detected_faces:
+                        distance = calculate_distance((x, y, w, h), detected_face)
+                        if distance < distance_threshold:
+                            is_duplicate = True
+                            break
+                    
+                    # If face is not a duplicate, process it
+                    if not is_duplicate:
+                        detected_faces.append((x, y, w, h))
+                        preprocessed_face = preprocess_face_image(frame[y:y+h, x:x+w])  # Preprocess for model
+                        face_images.append(preprocessed_face)
+                        
+                        # Break loop if maximum faces are reached
+                        if len(face_images) >= max_faces:
+                            break
+
+        frame_count += 1  # Increment frame counter
+    
+    video.release()  # Release video capture
+    return face_images
+
+# Loading video paths from train_df
+# Assuming train_df has a column 'video_clip_path' containing paths to video clips
+train_videos = train_df['video_clip_path'].tolist()  # Load all video paths from the DataFrame
+
+# Select a subset of videos - you can adjust this number as needed
+num_subset = 5  # Change this number to the subset size you want
+subset_videos = train_videos[:num_subset]  # Selecting the first num_subset videos
+
+# Process each video and store the results
+all_faces = {}
+
+for video_path in subset_videos:
+    faces = extract_faces_from_video(video_path, max_faces=5)  # Adjust max_faces as needed
+    if faces:
+        all_faces[video_path] = faces
+        print(f"Faces detected in {video_path}: {len(faces)} faces.")
+    else:
+        all_faces[video_path] = []
+        print(f"No faces detected in {video_path}.")
+
+print("Processing complete.")
