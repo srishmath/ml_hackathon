@@ -1,0 +1,145 @@
+import cv2
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torchvision import transforms
+
+# Define your CNN model (Simple example)
+class SimpleCNN(nn.Module):
+    def __init__(self):
+        super(SimpleCNN, self).__init__()
+        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
+        self.pool = nn.MaxPool2d(2, 2)
+        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
+        self.conv3 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
+        self.fc1 = nn.Linear(128 * 6 * 6, 512)  # Adjust based on your face image size
+        self.fc2 = nn.Linear(512, 128)
+        self.fc3 = nn.Linear(128, 10)  # Adjust based on your output size
+
+    def forward(self, x):
+        x = F.relu(self.conv1(x))
+        x = self.pool(x)
+        x = F.relu(self.conv2(x))
+        x = self.pool(x)
+        x = F.relu(self.conv3(x))
+        x = self.pool(x)
+        x = x.view(-1, 128 * 6 * 6)  # Flatten
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = self.fc3(x)
+        return x
+
+# Instantiate and load the model
+model = SimpleCNN()
+model.eval()  # Set model to evaluation mode
+
+# Define OpenCV face detection and eye detection functions
+def preprocess_face_image(face_image):
+    face_image = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)  # Convert to grayscale
+    face_image = cv2.resize(face_image, (48, 48))  # Resize to 48x48
+    face_image = face_image / 255.0  # Normalize to [0, 1]
+    return face_image.astype(np.float32).reshape(1, 48, 48)  # Add channel dimension for grayscale
+
+# Function to verify face by detecting eyes within the region
+def is_face_with_features(face_region, eye_cascade):
+    eyes = eye_cascade.detectMultiScale(face_region, scaleFactor=1.1, minNeighbors=5, minSize=(15, 15))
+    return len(eyes) >= 1
+
+# Function to calculate the Intersection over Union (IoU) between two bounding boxes
+def calculate_iou(bbox1, bbox2):
+    x1, y1, w1, h1 = bbox1
+    x2, y2, w2, h2 = bbox2
+    xA = max(x1, x2)
+    yA = max(y1, y2)
+    xB = min(x1 + w1, x2 + w2)
+    yB = min(y1 + h1, y2 + h2)
+    
+    inter_area = max(0, xB - xA) * max(0, yB - yA)
+    box1_area = w1 * h1
+    box2_area = w2 * h2
+    iou = inter_area / float(box1_area + box2_area - inter_area)
+    return iou
+
+# Function to extract verified faces from video using OpenCV face and eye detection
+def extract_faces_from_video(video_path, max_faces=5, frame_skip=5, iou_threshold=0.3):
+    face_images = []
+    video = cv2.VideoCapture(video_path)
+
+    # Load OpenCV cascades once
+    face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
+    eye_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_eye.xml')
+
+    frame_count = 0
+    detected_faces = []  # List to track faces across frames
+
+    while len(face_images) < max_faces:
+        ret, frame = video.read()
+        if not ret:
+            break
+
+        if frame_count % frame_skip == 0:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+
+            for (x, y, w, h) in faces:
+                face_region = gray[y:y+h, x:x+w]
+
+                if is_face_with_features(face_region, eye_cascade):
+                    is_duplicate = False
+
+                    # Check for IoU to avoid duplicate face detection
+                    for detected_face in detected_faces:
+                        iou = calculate_iou((x, y, w, h), detected_face)
+                        if iou > iou_threshold:
+                            is_duplicate = True
+                            break
+                    
+                    if not is_duplicate:
+                        detected_faces.append((x, y, w, h))
+                        preprocessed_face = preprocess_face_image(frame[y:y+h, x:x+w])
+                        face_images.append(preprocessed_face)
+                        
+                        if len(face_images) >= max_faces:
+                            break
+
+        frame_count += 1
+    
+    video.release()
+    return face_images
+
+# Transform function for PyTorch model (convert to tensor and normalize)
+transform = transforms.Compose([
+    transforms.ToPILImage(),
+    transforms.Resize((48, 48)),
+    transforms.Grayscale(num_output_channels=1),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.5], std=[0.5])
+])
+
+# Initialize a new column in `train_df` to store the face features for each video
+train_df['face_features'] = None  # Create an empty column
+
+# Loop through each video path, extract faces, pass through CNN, and store features in `train_df`
+for index, video_path in enumerate(train_df['video_clip_path']):
+    faces = extract_faces_from_video(video_path, max_faces=5)  # Extract faces
+    face_features = []  # List to store features for this video
+
+    if faces:
+        for face in faces:
+            # Convert face image to tensor and preprocess for CNN
+            face_tensor = torch.tensor(face).unsqueeze(0).float()  # Shape: (1, 48, 48)
+            face_tensor = face_tensor.squeeze(0)  # Shape: (48, 48)
+            face_tensor = transform(face_tensor)  # Apply transformation for model input
+            face_tensor = face_tensor.unsqueeze(0)  # Shape: (1, 1, 48, 48)
+
+            # Forward pass through CNN to get features
+            with torch.no_grad():
+                output = model(face_tensor)  # Get feature vector from model
+                face_features.append(output.numpy())  # Append numpy array of features
+
+    # Save the list of feature arrays for this video in `train_df`
+    train_df.at[index, 'face_features'] = face_features
+
+# Display the updated train_df with face features
+print(train_df[['video_clip_path', 'face_features']].head())
