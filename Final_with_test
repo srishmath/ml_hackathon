@@ -1,0 +1,91 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from sklearn.model_selection import train_test_split
+import numpy as np
+import pandas as pd
+
+# Dummy dataset for illustration
+# Replace this with your actual features DataFrame
+data = {'text_embedding': [np.random.rand(10).tolist() for _ in range(50)], 'label': np.random.randint(0, 2, size=50)}
+features_df = pd.DataFrame(data)
+
+# Check the structure of the text_embedding column
+print(f"First sample in 'text_embedding': {features_df['text_embedding'].iloc[0]}")  # Check first entry
+
+# Ensure the 'text_embedding' column contains list-like structures (if not, handle it accordingly)
+if isinstance(features_df['text_embedding'].iloc[0], list):  # If it's a list-like structure
+    # Split into train and test sets (60% train, 40% test)
+    train_text_embeddings = torch.tensor(features_df['text_embedding'].iloc[:40].tolist())  # First 40 samples for training
+    test_text_embeddings = torch.tensor(features_df['text_embedding'].iloc[40:].tolist())  # Last 10 samples for testing
+
+    # Labels (you can modify this as per your actual label column)
+    train_labels = torch.tensor(features_df['label'].iloc[:40].values)
+    test_labels = torch.tensor(features_df['label'].iloc[40:].values)
+else:
+    # Handle case where 'text_embedding' column isn't list-like
+    train_text_embeddings = torch.tensor(features_df['text_embedding'].iloc[:40].values)
+    test_text_embeddings = torch.tensor(features_df['text_embedding'].iloc[40:].values)
+    train_labels = torch.tensor(features_df['label'].iloc[:40].values)
+    test_labels = torch.tensor(features_df['label'].iloc[40:].values)
+
+# Check data types and shapes
+print(f"Train text embeddings shape: {train_text_embeddings.shape}")
+print(f"Test text embeddings shape: {test_text_embeddings.shape}")
+print(f"Train labels shape: {train_labels.shape}")
+print(f"Test labels shape: {test_labels.shape}")
+
+# Define the neural network model (simple feed-forward MLP)
+class SimpleNN(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size):
+        super(SimpleNN, self).__init__()
+        self.fc1 = nn.Linear(input_size, hidden_size)
+        self.fc2 = nn.Linear(hidden_size, output_size)
+        self.relu = nn.ReLU()
+        self.softmax = nn.Softmax(dim=1)  # For multi-class classification, change if binary classification
+    
+    def forward(self, x):
+        x = self.relu(self.fc1(x))
+        x = self.fc2(x)
+        return self.softmax(x)  # Output class probabilities
+
+# Define model parameters
+input_size = train_text_embeddings.shape[1]  # Embedding dimension (e.g., 10 here)
+hidden_size = 128  # Number of neurons in hidden layer
+output_size = 2  # Binary classification (e.g., 0 or 1)
+
+# Instantiate the model
+model = SimpleNN(input_size, hidden_size, output_size)
+
+# Define loss function and optimizer
+loss_fn = nn.CrossEntropyLoss()  # For binary classification, you could also use nn.BCEWithLogitsLoss
+optimizer = optim.Adam(model.parameters(), lr=0.001)
+
+# Training loop
+num_epochs = 20
+for epoch in range(num_epochs):
+    model.train()  # Set the model to training mode
+
+    # Forward pass
+    outputs = model(train_text_embeddings.float())  # Convert input embeddings to float
+    loss = loss_fn(outputs, train_labels)
+
+    # Backward pass and optimization
+    optimizer.zero_grad()  # Zero the gradients
+    loss.backward()  # Compute gradients
+    optimizer.step()  # Update parameters
+
+    if (epoch+1) % 5 == 0:
+        print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {loss.item():.4f}")
+
+# Evaluation on the test set
+model.eval()  # Set the model to evaluation mode
+with torch.no_grad():  # No need to compute gradients during inference
+    outputs = model(test_text_embeddings.float())
+    _, predicted = torch.max(outputs, 1)  # Get the class with the highest probability
+
+    # Calculate accuracy
+    correct = (predicted == test_labels).sum().item()
+    accuracy = correct / test_labels.size(0)
+    print(f"Test Accuracy: {accuracy*100:.2f}%")
+
