@@ -1,0 +1,114 @@
+# Import necessary libraries
+import cv2
+import numpy as np
+import os
+from sklearn.model_selection import train_test_split
+from sklearn.svm import SVC
+from skimage.feature import hog
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import Conv2D, MaxPooling2D, Flatten, Dense
+
+# Path to save extracted frames
+frame_save_path = 'frames'
+
+# Define function to extract frames from a video
+def extract_frames(video_path, start_time, end_time, frame_rate=0.5):
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    frames_to_extract = int(fps * frame_rate)
+    frame_count = 0
+    saved_frames = []
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        if frame_count % frames_to_extract == 0:
+            # Save frames in specified folder
+            frame_name = f'{frame_save_path}/frame_{frame_count}.jpg'
+            cv2.imwrite(frame_name, frame)
+            saved_frames.append(frame_name)
+
+        frame_count += 1
+    cap.release()
+    return saved_frames
+
+# Load frames within specified timestamps
+video_path = 'path_to_video.mp4'
+start_time, end_time = 0, 10  # Example times
+frames = extract_frames(video_path, start_time, end_time)
+
+# Basic CNN model for face detection
+def build_face_detection_model():
+    model = Sequential([
+        Conv2D(32, (3, 3), activation='relu', input_shape=(128, 128, 1)),
+        MaxPooling2D((2, 2)),
+        Conv2D(64, (3, 3), activation='relu'),
+        MaxPooling2D((2, 2)),
+        Conv2D(128, (3, 3), activation='relu'),
+        MaxPooling2D((2, 2)),
+        Flatten(),
+        Dense(128, activation='relu'),
+        Dense(4, activation='linear')  # Predicts bounding box [x, y, width, height]
+    ])
+    model.compile(optimizer='adam', loss='mse')
+    return model
+
+face_detection_model = build_face_detection_model()
+
+# Dummy function for detecting landmarks (eyes, nose, mouth)
+def detect_landmarks(face_img):
+    # Here you would use another model, or the same CNN with modifications, for landmark detection
+    landmarks = {'left_eye': (30, 30), 'right_eye': (60, 30), 'nose': (45, 50), 'mouth': (45, 70)}
+    return landmarks
+
+# Feature extraction (using HOG as an example)
+def extract_features(image):
+    gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    features, hog_image = hog(gray_image, pixels_per_cell=(8, 8),
+                              cells_per_block=(2, 2), visualize=True, multichannel=False)
+    return features
+
+# Emotion classification with a simple SVM (for illustration)
+# Prepare dataset for emotion classification
+features = []
+labels = []
+
+# Loop over extracted frames and extract HOG features
+for frame_path in frames:
+    frame = cv2.imread(frame_path)
+    face_coords = face_detection_model.predict(np.expand_dims(cv2.resize(frame, (128, 128)), axis=0))
+    # Extract face region from coordinates
+    x, y, w, h = map(int, face_coords[0])
+    face_region = frame[y:y+h, x:x+w]
+    landmarks = detect_landmarks(face_region)
+    hog_features = extract_features(face_region)
+    features.append(hog_features)
+    # Append dummy label (replace with actual emotion label from dataset)
+    labels.append(0)
+
+# Convert features and labels to arrays
+features = np.array(features)
+labels = np.array(labels)
+
+# Split data into training and testing
+X_train, X_test, y_train, y_test = train_test_split(features, labels, test_size=0.2)
+
+# Train a simple SVM classifier
+classifier = SVC(kernel='linear')
+classifier.fit(X_train, y_train)
+
+# Evaluate the model
+accuracy = classifier.score(X_test, y_test)
+print(f"Emotion Classification Accuracy: {accuracy * 100:.2f}%")
+
+# Test with a new frame (modify as needed)
+new_frame = cv2.imread(frames[0])
+face_coords = face_detection_model.predict(np.expand_dims(cv2.resize(new_frame, (128, 128)), axis=0))
+x, y, w, h = map(int, face_coords[0])
+face_region = new_frame[y:y+h, x:x+w]
+hog_features = extract_features(face_region)
+emotion_prediction = classifier.predict([hog_features])
+print(f"Predicted Emotion: {emotion_prediction}")
